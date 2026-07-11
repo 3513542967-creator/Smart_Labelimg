@@ -1,0 +1,5 @@
+torch==2.13.0
+torchvision==0.28.0
+timm>=1.0,<2
+onnx>=1.16,<2
+mobile-sam @ git+https://github.com/ChaoningZhang/MobileSAM.git
