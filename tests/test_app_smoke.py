@@ -444,6 +444,96 @@ def test_save_target_folder_autosaves_annotation_changes(tmp_path):
     window.close()
 
 
+def test_image_folder_saves_each_edited_image_to_matching_label_file(tmp_path):
+    image_folder = tmp_path / "images"
+    label_folder = tmp_path / "labels"
+    image_folder.mkdir()
+    label_folder.mkdir()
+    for name in ("01-one.jpg", "02-two.jpg", "03-three.jpg"):
+        cv2.imwrite(str(image_folder / name), np.zeros((80, 120, 3), dtype=np.uint8))
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    window.open_image_path(image_folder)
+    window.set_save_target(label_folder, is_directory=True)
+    window.canvas.boxes = [Box("car", 10, 12, 50, 60)]
+    window.canvas.boxes_changed.emit()
+    window.next_image()
+    window.canvas.boxes = [Box("person", 20, 10, 70, 70)]
+    window.canvas.boxes_changed.emit()
+    window.next_image()
+
+    assert (label_folder / "01-one.txt").read_text(encoding="utf-8").startswith("3 ")
+    assert (label_folder / "02-two.txt").read_text(encoding="utf-8").startswith("1 ")
+    assert not (label_folder / "03-three.txt").exists()
+    assert (label_folder / "classes.txt").exists()
+    assert window.current_image == image_folder / "03-three.jpg"
+    window.close()
+
+
+def test_selecting_empty_label_folder_does_not_create_empty_current_label(tmp_path):
+    image_folder = tmp_path / "images"
+    label_folder = tmp_path / "labels"
+    image_folder.mkdir()
+    label_folder.mkdir()
+    cv2.imwrite(str(image_folder / "one.jpg"), np.zeros((80, 120, 3), dtype=np.uint8))
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    window.open_image_path(image_folder)
+    window.set_save_target(label_folder, is_directory=True)
+
+    assert not (label_folder / "one.txt").exists()
+    assert window.save_directory == label_folder
+    assert window.label_directory == label_folder
+    window.close()
+
+
+def test_reopening_image_and_label_folders_restores_matching_annotations(tmp_path):
+    image_folder = tmp_path / "images"
+    label_folder = tmp_path / "labels"
+    image_folder.mkdir()
+    label_folder.mkdir()
+    for name in ("one.jpg", "two.jpg"):
+        cv2.imwrite(str(image_folder / name), np.zeros((80, 120, 3), dtype=np.uint8))
+    labels = ["object", "person", "vehicle", "car"]
+    save_yolo(label_folder / "one.txt", [Box("car", 10, 12, 50, 60)], labels, (120, 80))
+    save_yolo(label_folder / "two.txt", [Box("person", 20, 10, 70, 70)], labels, (120, 80))
+    (label_folder / "classes.txt").write_text("\n".join(labels) + "\n", encoding="utf-8")
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    window.open_image_path(image_folder)
+    window.load_label_source(label_folder)
+    assert window.canvas.boxes == [Box("car", 10, 12, 50, 60)]
+    window.next_image()
+
+    assert window.canvas.boxes == [Box("person", 20, 10, 70, 70)]
+    assert window.current_label_path == label_folder / "two.txt"
+    assert window.save_directory == label_folder
+    window.close()
+
+
+def test_label_folder_with_only_xml_switches_folder_mapping_to_voc(tmp_path):
+    image_folder = tmp_path / "images"
+    label_folder = tmp_path / "labels"
+    image_folder.mkdir()
+    label_folder.mkdir()
+    image_path = image_folder / "one.jpg"
+    cv2.imwrite(str(image_path), np.zeros((80, 120, 3), dtype=np.uint8))
+    save_voc_xml(label_folder / "one.xml", [Box("car", 10, 12, 50, 60)], (120, 80), image_path)
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    window.open_image_path(image_folder)
+    window.load_label_source(label_folder)
+
+    assert window.annotation_format == AnnotationFormat.VOC_XML
+    assert window.current_label_path == label_folder / "one.xml"
+    assert window.canvas.boxes == [Box("car", 10, 12, 50, 60)]
+    window.close()
+
+
 def test_save_target_file_autosaves_label_renames(tmp_path):
     image_path = tmp_path / "one.jpg"
     label_path = tmp_path / "custom.xml"

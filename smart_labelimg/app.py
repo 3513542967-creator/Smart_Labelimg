@@ -570,6 +570,7 @@ class MainWindow(QMainWindow):
         self.backend = self._create_backend()
         self.labels = SIMPLE_LABELS.copy()
         self.images: list[Path] = []
+        self.image_source_is_directory = False
         self.image_index = -1
         self.current_image: Path | None = None
         self.image_size: tuple[int, int] | None = None
@@ -954,6 +955,9 @@ class MainWindow(QMainWindow):
         if target is None:
             self.save_target_label.setText("Auto Save: choose target")
             return
+        if self.save_directory is not None:
+            self.save_target_label.setText(f"Auto Save Folder: {target.as_posix()}")
+            return
         self.save_target_label.setText(f"Auto Save: {target.as_posix()}")
 
     def current_save_path(self) -> Path | None:
@@ -984,11 +988,9 @@ class MainWindow(QMainWindow):
         if self.current_image is None and not self.images:
             self.status.showMessage("Open an image or folder first")
             return
-        mode, ok = QInputDialog.getItem(self, "Open Label", "Open label:", ["Label File", "Label Folder"], 0, False)
-        if not ok:
-            return
-        if mode == "Label Folder":
-            folder = QFileDialog.getExistingDirectory(self, "Open label folder", str(Path.home()))
+        if self.image_source_is_directory:
+            start = str(self.save_directory or self.label_directory or self.current_image.parent)
+            folder = QFileDialog.getExistingDirectory(self, "Open label folder", start)
             if folder:
                 self.load_label_source(Path(folder))
             return
@@ -1020,8 +1022,11 @@ class MainWindow(QMainWindow):
             return
         self.label_directory = None
         self.save_directory = None
+        self.image_source_is_directory = path.is_dir()
         if path.is_dir():
             self._remember_folder(path)
+            self.label_directory = path
+            self.save_directory = path
             self.images = candidates
             self.image_index = 0 if self.images else -1
             self.refresh_image_list()
@@ -1062,14 +1067,42 @@ class MainWindow(QMainWindow):
         return find_annotation_path(image_path, self.annotation_format)
 
     def load_label_source(self, path: Path) -> None:
+        if self.current_image is not None and not self.save_current(force=False):
+            return
         if path.is_dir():
             self.label_directory = path
+            self.save_directory = path
+            detected_format = self._detect_label_directory_format(path)
+            if detected_format is not None:
+                self.set_annotation_format(detected_format)
+            if self.annotation_format == AnnotationFormat.YOLO:
+                loaded_labels = load_yolo_classes(path / "placeholder.txt")
+                if loaded_labels:
+                    self.labels = loaded_labels
+                    self._refresh_classes(self.canvas.current_label)
             if self.current_image is not None:
                 self.load_image_with_label(self.current_image, None)
             return
         self.label_directory = None
+        self.save_directory = None
         if self.current_image is not None:
             self.load_image_with_label(self.current_image, path)
+
+    def _detect_label_directory_format(self, path: Path) -> AnnotationFormat | None:
+        image_stems = {image.stem.casefold() for image in self.images}
+        yolo_found = any(
+            child.is_file() and child.suffix.lower() == ".txt" and child.stem.casefold() in image_stems
+            for child in path.iterdir()
+        )
+        voc_found = any(
+            child.is_file() and child.suffix.lower() == ".xml" and child.stem.casefold() in image_stems
+            for child in path.iterdir()
+        )
+        if yolo_found and not voc_found:
+            return AnnotationFormat.YOLO
+        if voc_found and not yolo_found:
+            return AnnotationFormat.VOC_XML
+        return None
 
     def load_current_image(self) -> None:
         if self.image_index < 0 or self.image_index >= len(self.images):
@@ -1487,12 +1520,28 @@ class MainWindow(QMainWindow):
     def save_current_explicit(self, *_args) -> bool:
         return self.save_current(show_status=True, force=True)
 
-    def set_save_target(self, path: Path) -> None:
-        if path.is_dir():
+    def set_save_target(self, path: Path, is_directory: bool | None = None) -> None:
+        directory_target = path.is_dir() if is_directory is None else is_directory
+        if directory_target:
+            path.mkdir(parents=True, exist_ok=True)
+            should_copy_current = self.annotation_dirty or bool(self.canvas.boxes)
             self.save_directory = path
+            self.label_directory = path
             self.current_label_path = None
+            detected_format = self._detect_label_directory_format(path)
+            if detected_format is not None:
+                self.set_annotation_format(detected_format)
+            if should_copy_current:
+                self.update_save_target_label()
+                self.save_current(show_status=False, force=True)
+            elif self.current_image is not None:
+                self.load_image_with_label(self.current_image, None)
+            else:
+                self.update_save_target_label()
+            return
         else:
             self.save_directory = None
+            self.label_directory = None
             self.current_label_path = path
             self.set_annotation_format(infer_format_from_path(path))
         self.update_save_target_label()
@@ -1501,20 +1550,11 @@ class MainWindow(QMainWindow):
     def save_target_dialog(self) -> None:
         if not self.current_image:
             return
-        mode, ok = QInputDialog.getItem(
-            self,
-            "Save/Target",
-            "Save to:",
-            ["Label File", "Label Folder"],
-            0,
-            False,
-        )
-        if not ok:
-            return
-        if mode == "Label Folder":
-            folder = QFileDialog.getExistingDirectory(self, "Save label folder", str(Path.home()))
+        if self.image_source_is_directory:
+            start = str(self.save_directory or self.current_image.parent)
+            folder = QFileDialog.getExistingDirectory(self, "Choose label save folder", start)
             if folder:
-                self.set_save_target(Path(folder))
+                self.set_save_target(Path(folder), is_directory=True)
             return
         current_target = self.current_save_path() or self.current_image.with_suffix(".txt")
         path, selected_filter = QFileDialog.getSaveFileName(
@@ -1528,13 +1568,9 @@ class MainWindow(QMainWindow):
         label_path = Path(path)
         if not label_path.suffix:
             label_path = label_path.with_suffix(".xml" if "XML" in selected_filter else ".txt")
-        self.set_save_target(label_path)
+        self.set_save_target(label_path, is_directory=False)
 
     def save_or_target_dialog(self) -> None:
-        if self.current_save_path() is None:
-            self.save_target_dialog()
-            return
-        self.save_current(force=True)
         self.save_target_dialog()
 
     def rename_class(self, old_label: str, new_label: str) -> bool:
